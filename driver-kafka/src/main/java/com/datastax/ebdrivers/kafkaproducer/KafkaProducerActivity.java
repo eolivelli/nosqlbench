@@ -1,6 +1,9 @@
 package com.datastax.ebdrivers.kafkaproducer;
 
+import com.codahale.metrics.Counter;
+import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Timer;
+import io.nosqlbench.engine.api.activityapi.errorhandling.modular.NBErrorHandler;
 import io.nosqlbench.engine.api.activityapi.planning.OpSequence;
 import io.nosqlbench.engine.api.activityapi.planning.SequencePlanner;
 import io.nosqlbench.engine.api.activityapi.planning.SequencerType;
@@ -23,10 +26,16 @@ public class KafkaProducerActivity extends SimpleActivity {
     private String yamlLoc;
     private String clientId;
     private String servers;
-    private OpSequence<KafkaStatement> opSequence;
     private String schemaRegistryUrl;
+    private OpSequence<KafkaStatement> opSequence;
+    private boolean kafkaAsyncOp;
     Timer resultTimer;
     Timer resultSuccessTimer;
+    Timer bindTimer;
+    Timer executeTimer;
+    Counter bytesCounter;
+    Histogram messagesizeHistogram;
+    private NBErrorHandler errorhandler;
 
 
     public KafkaProducerActivity(ActivityDef activityDef) {
@@ -50,6 +59,10 @@ public class KafkaProducerActivity extends SimpleActivity {
         schemaRegistryUrl = activityDef.getParams()
             .getOptionalString("schema_registry_url", "schema.registry.url")
             .orElse("http://localhost:8081");
+        kafkaAsyncOp = activityDef.getParams()
+            .getOptionalBoolean("async_api")
+            .orElse(false);
+        logger.info("Activity params {}", activityDef.getParams());
     }
 
     @Override
@@ -57,11 +70,23 @@ public class KafkaProducerActivity extends SimpleActivity {
         logger.debug("initializing activity: " + this.activityDef.getAlias());
         onActivityDefUpdate(activityDef);
 
+        resultTimer = ActivityMetrics.timer(activityDef, "result");
+        resultSuccessTimer = ActivityMetrics.timer(activityDef, "result-success");
+
+        bindTimer = ActivityMetrics.timer(activityDef, "bind");
+        executeTimer = ActivityMetrics.timer(activityDef, "execute");
+
+        bytesCounter = ActivityMetrics.counter(activityDef, "bytes");
+        messagesizeHistogram = ActivityMetrics.histogram(activityDef, "messagesize");
+
+        this.errorhandler = new NBErrorHandler(
+            () -> activityDef.getParams().getOptionalString("errors").orElse("stop"),
+            this::getExceptionMetrics
+        );
+
         opSequence = initOpSequencer();
         setDefaultsFromOpSequence(opSequence);
 
-        resultTimer = ActivityMetrics.timer(activityDef, "result");
-        resultSuccessTimer = ActivityMetrics.timer(activityDef, "result-success");
     }
 
     private OpSequence<KafkaStatement> initOpSequencer() {
@@ -74,6 +99,7 @@ public class KafkaProducerActivity extends SimpleActivity {
         StmtsDocList stmtsDocList = StatementsLoader.loadPath(logger, yamlLoc, new StrInterpolator(activityDef),
             "activities");
         List<OpTemplate> statements = stmtsDocList.getStmts(tagFilter);
+        logger.info("async_api {}", kafkaAsyncOp);
 
         String format = getParams().getOptionalString("format").orElse(null);
 
@@ -83,7 +109,10 @@ public class KafkaProducerActivity extends SimpleActivity {
                     new KafkaStatement(statement,
                                        servers,
                                        clientId,
-                                       schemaRegistryUrl),
+                                       schemaRegistryUrl,
+                                       kafkaAsyncOp,
+                                       bytesCounter,
+                                       messagesizeHistogram),
                     statement.getParamOrDefault("ratio", 1)
                 );
             }
@@ -96,5 +125,17 @@ public class KafkaProducerActivity extends SimpleActivity {
 
     protected OpSequence<KafkaStatement> getOpSequencer() {
         return opSequence;
+    }
+
+    public Timer getBindTimer() {
+        return bindTimer;
+    }
+
+    public Timer getExecuteTimer() {
+        return executeTimer;
+    }
+
+    public NBErrorHandler getErrorhandler() {
+        return errorhandler;
     }
 }

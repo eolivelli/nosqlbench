@@ -1,5 +1,7 @@
 package com.datastax.ebdrivers.kafkaproducer;
 
+import com.codahale.metrics.Counter;
+import com.codahale.metrics.Histogram;
 import io.confluent.kafka.schemaregistry.avro.AvroSchema;
 import io.confluent.kafka.schemaregistry.avro.AvroSchemaUtils;
 import io.nosqlbench.engine.api.activityconfig.yaml.OpTemplate;
@@ -30,11 +32,20 @@ public class KafkaStatement {
     private AvroSchema keySerializerSchema = null;
     private AvroSchema valueSerializerSchema = null;
     private final String key;
+    private final boolean kafkaAsyncOp;
+    private final Counter bytesCounter;
+    private final Histogram messagesizeHistogram;
 
-    public KafkaStatement(OpTemplate stmtDef, String servers, String clientId, String schemaRegistryUrl) {
+    private volatile Throwable lastAsyncOperationFailure;
+
+    public KafkaStatement(OpTemplate stmtDef, String servers, String clientId, String schemaRegistryUrl, boolean kafkaAsyncOp,
+                          Counter bytesCounter, Histogram messagesizeHistogram) {
         ParsedTemplate paramTemplate = new ParsedTemplate(stmtDef.getStmt(), stmtDef.getBindings());
         BindingsTemplate paramBindings = new BindingsTemplate(paramTemplate.getBindPoints());
         StringBindingsTemplate template = new StringBindingsTemplate(stmtDef.getStmt(), paramBindings);
+        this.kafkaAsyncOp = kafkaAsyncOp;
+        this.bytesCounter = bytesCounter;
+        this.messagesizeHistogram = messagesizeHistogram;
 
         this.bindings = template.resolve();
 
@@ -95,7 +106,7 @@ public class KafkaStatement {
         try {
             producer = new KafkaProducer<>(props);
         } catch (Exception e) {
-            logger.error("Error constructing kafka producer", e);
+            throw new RuntimeException("Error constructing kafka producer", e);
         }
     }
 
@@ -127,15 +138,35 @@ public class KafkaStatement {
         return statement;
     }
 
-    public void write(long cycle) {
+    public void write(long cycle, Runnable timeTracker) {
+        if (lastAsyncOperationFailure != null) {
+            throw new RuntimeException("Some operations failed", lastAsyncOperationFailure);
+        }
+
         Object key = bindKey(cycle);
         Object value = bindValue(cycle);
-        try {
-            ProducerRecord<Object, Object> record = new ProducerRecord<>(topic, key, value);
-            Future<RecordMetadata> send = producer.send(record);
-            RecordMetadata result = send.get();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+        ProducerRecord<Object, Object> record = new ProducerRecord<>(topic, key, value);
+        if (kafkaAsyncOp) {
+            // we rely on max.block.ms in order to throttle the request in this case
+            // the same happens in PulsarProducerOp
+            producer.send(record, (metadata, exception) -> {
+                timeTracker.run();
+                if (exception != null) {
+                    lastAsyncOperationFailure = exception;
+                } else {
+                    int messagesize = metadata.serializedKeySize() + metadata.serializedValueSize();
+                    messagesizeHistogram.update(messagesize);
+                    bytesCounter.inc(messagesize);
+                }
+            });
+        } else {
+            try {
+                Future<RecordMetadata> send = producer.send(record);
+                send.get();
+                timeTracker.run();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 }
