@@ -33,7 +33,7 @@
     </description>
 
     <properties>
-        <venice.version>0.4.17-alpha-12</venice.version>
+        <venice.version>0.4.93-alpha-1</venice.version>
     </properties>
 
     <dependencies>

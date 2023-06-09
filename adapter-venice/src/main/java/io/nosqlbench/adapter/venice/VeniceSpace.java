@@ -43,6 +43,9 @@ public class VeniceSpace implements  AutoCloseable {
 
     private long veniceActivityStartTimeMills;
     private final String token;
+    private final boolean enableHttp2;
+    private final int maxConnectionsTotal;
+    private final int maxConnectionsPerRoute;
     private ClientConfig clientConfig;
 
     private AvroGenericStoreClient<Object, Object> client;
@@ -56,8 +59,10 @@ public class VeniceSpace implements  AutoCloseable {
 
         this.routerUrl = cfg.get("router_url");
         this.storeName = cfg.get("store_name");
-        this.token = cfg.get("token");
-
+        this.token = cfg.getOptional("token").orElse(null);
+        this.enableHttp2 = Boolean.parseBoolean(cfg.getOptional("enableHttp2").orElse("false"));
+        this.maxConnectionsTotal = Integer.parseInt(cfg.getOptional("maxConnectionsTotal").orElse("0"));
+        this.maxConnectionsPerRoute = Integer.parseInt(cfg.getOptional("maxConnectionsPerRoute").orElse("0"));
         this.veniceActivityStartTimeMills = System.currentTimeMillis();
         this.initializeSpace();
     }
@@ -75,6 +80,12 @@ public class VeniceSpace implements  AutoCloseable {
                 .setDescription("Name of the Venice store"))
             .add(Param.defaultTo("token", "")
                 .setDescription("JWT Token Authentication"))
+            .add(Param.defaultTo("enableHttp2", "false")
+                .setDescription("Use HTTP2 (TLS only)"))
+            .add(Param.defaultTo("maxConnectionsTotal", "10")
+                .setDescription("Maximum number of connections to the Venice cluster"))
+            .add(Param.defaultTo("maxConnectionsPerRoute", "10")
+                .setDescription("Maximum number of connections per Venice node"))
             .asReadOnly();
     }
 
@@ -97,6 +108,8 @@ public class VeniceSpace implements  AutoCloseable {
         this.clientConfig = ClientConfig.defaultGenericClientConfig(storeName);
         clientConfig.setVeniceURL(routerUrl);
         clientConfig.setForceClusterDiscoveryAtStartTime(true);
+        clientConfig.setMaxConnectionsTotal(maxConnectionsTotal);
+        clientConfig.setMaxConnectionsPerRoute(maxConnectionsPerRoute);
         if (token != null && !token.isEmpty()) {
             clientConfig.setAuthenticationProvider(ClientAuthenticationProviderToken.TOKEN(token));
         }
